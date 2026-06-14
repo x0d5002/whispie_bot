@@ -3,7 +3,6 @@ import time
 import json
 import logging
 import requests
-from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 
 logging.basicConfig(
@@ -45,61 +44,65 @@ def send_telegram(text: str):
     else:
         log.info("Telegram mesajı gönderildi.")
 
-def fetch_questions(browser) -> list[dict]:
-    questions = []
+def fetch_questions() -> list[dict]:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+    }
     try:
-        page = browser.new_page()
-        page.set_extra_http_headers({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
-        })
-        log.info("Sayfa açılıyor: %s", WHISPI_URL)
-        page.goto(WHISPI_URL, wait_until="networkidle", timeout=30000)
-        page.wait_for_timeout(5000)
+        resp = requests.get(WHISPI_URL, headers=headers, timeout=15)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        log.error("whispi.io isteği başarısız: %s", e)
+        return []
 
-        html = page.content()
-        page.close()
+    soup = BeautifulSoup(resp.text, "html.parser")
+    questions = []
 
-        # HTML yapısını debug için log'a yaz (ilk 3000 karakter)
-        log.info("=== SAYFA HTML BAŞLANGIÇ ===")
-        log.info(html[:3000])
-        log.info("=== SAYFA HTML BİTİŞ ===")
+    for card in soup.select("div, article, li"):
+        text = card.get_text(separator=" ", strip=True)
+        if text and 10 < len(text) < 500:
+            q_id = str(hash(text[:100]))
+            questions.append({"id": q_id, "text": text})
 
-        soup = BeautifulSoup(html, "html.parser")
-
-        # Tüm div class isimlerini listele
-        all_classes = set()
-        for tag in soup.find_all(True):
-            if tag.get("class"):
-                for c in tag["class"]:
-                    all_classes.add(c)
-        log.info("Sayfadaki CSS sınıfları: %s", list(all_classes)[:50])
-
-    except Exception as e:
-        log.error("Sayfa çekilemedi: %s", e)
-
+    log.info("%d soru bulundu.", len(questions))
     return questions
 
 def main():
     log.info("Bot başlatılıyor... Kullanıcı: %s", WHISPI_USERNAME)
     send_telegram(
-        f"🤖 <b>Whispi Bot Aktif! (Debug Modu)</b>\n\n"
+        f"🤖 <b>Whispi Bot Aktif!</b>\n\n"
         f"📋 Profil: <a href='{WHISPI_URL}'>@{WHISPI_USERNAME}</a>\n"
-        f"HTML yapısı inceleniyor, logları kontrol et..."
+        f"⏱ Kontrol aralığı: her {CHECK_INTERVAL} saniye\n\n"
+        f"Yeni sorular geldiğinde buraya bildirim alacaksın. 🔔"
     )
 
     seen = load_seen()
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
-        )
+    while True:
+        try:
+            questions = fetch_questions()
+            new_count = 0
 
-        # Sadece bir kez çalıştır (debug için)
-        fetch_questions(browser)
-        log.info("Debug tamamlandı. Logları kontrol et.")
+            for q in questions:
+                if q["id"] not in seen:
+                    seen.add(q["id"])
+                    new_count += 1
+                    msg = (
+                        f"📩 <b>Yeni Anonim Soru!</b>\n\n"
+                        f"❓ {q['text']}\n\n"
+                        f"👉 <a href='{WHISPI_URL}'>Cevaplamak için tıkla</a>"
+                    )
+                    send_telegram(msg)
+                    time.sleep(1)
 
-        browser.close()
+            if new_count:
+                save_seen(seen)
+            else:
+                log.info("Yeni soru yok.")
 
-if __name__ == "__main__":
-    main()
+        except Exception as e:
+            log.error("Beklenmeyen hata: %s", e)
+
+        time.sleep(CHECK_INTERVAL)
+
+if
